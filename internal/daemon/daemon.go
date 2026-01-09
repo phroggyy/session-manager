@@ -28,7 +28,8 @@ type Daemon struct {
 }
 
 // New creates a new Daemon instance.
-func New(sess *session.Session, cfg *config.Config, logger *zap.Logger) (*Daemon, error) {
+// configPath is the path to the config file, used for resolving relative env_file paths.
+func New(sess *session.Session, cfg *config.Config, configPath string, logger *zap.Logger) (*Daemon, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -38,6 +39,7 @@ func New(sess *session.Session, cfg *config.Config, logger *zap.Logger) (*Daemon
 	d := &Daemon{
 		session:     sess,
 		config:      cfg,
+		configPath:  configPath,
 		procMgr:     procMgr,
 		logger:      logger,
 		subscribers: make([]chan Event, 0),
@@ -294,9 +296,26 @@ func (d *Daemon) startAllProcesses(worktreePath string) error {
 		return fmt.Errorf("no configuration loaded")
 	}
 
+	// Get base path for resolving relative env_file paths
+	basePath := filepath.Dir(d.configPath)
+	if basePath == "" {
+		basePath = worktreePath
+	}
+
 	var errs []error
 	for _, procCfg := range d.config.Processes {
-		if err := d.procMgr.Start(procCfg, worktreePath); err != nil {
+		// Resolve environment variables from env_file and inline env
+		env, err := d.config.GetEnv(procCfg, basePath)
+		if err != nil {
+			d.logger.Error("failed to load environment for process",
+				zap.String("name", procCfg.Name),
+				zap.Error(err),
+			)
+			errs = append(errs, fmt.Errorf("failed to load env for %s: %w", procCfg.Name, err))
+			continue
+		}
+
+		if err := d.procMgr.Start(procCfg, worktreePath, env); err != nil {
 			d.logger.Error("failed to start process",
 				zap.String("name", procCfg.Name),
 				zap.Error(err),

@@ -60,7 +60,7 @@ func TestStartAndStopProcess(t *testing.T) {
 	}
 
 	// Start the process
-	err := m.Start(cfg, worktreePath)
+	err := m.Start(cfg, worktreePath, cfg.Env)
 	if err != nil {
 		t.Fatalf("failed to start process: %v", err)
 	}
@@ -110,14 +110,14 @@ func TestStartDuplicateProcess(t *testing.T) {
 	}
 
 	// Start the process
-	err := m.Start(cfg, worktreePath)
+	err := m.Start(cfg, worktreePath, cfg.Env)
 	if err != nil {
 		t.Fatalf("failed to start process: %v", err)
 	}
 	defer m.Stop("test-process")
 
 	// Try to start it again
-	err = m.Start(cfg, worktreePath)
+	err = m.Start(cfg, worktreePath, cfg.Env)
 	if err == nil {
 		t.Error("expected error when starting duplicate process")
 	}
@@ -162,8 +162,8 @@ func TestList(t *testing.T) {
 	cfg1 := config.ProcessConfig{Name: "proc1", Command: "sleep 60"}
 	cfg2 := config.ProcessConfig{Name: "proc2", Command: "sleep 60"}
 
-	m.Start(cfg1, worktreePath)
-	m.Start(cfg2, worktreePath)
+	m.Start(cfg1, worktreePath, cfg1.Env)
+	m.Start(cfg2, worktreePath, cfg2.Env)
 	defer m.StopAll()
 
 	list = m.List()
@@ -187,8 +187,8 @@ func TestStopAll(t *testing.T) {
 	cfg1 := config.ProcessConfig{Name: "proc1", Command: "sleep 60"}
 	cfg2 := config.ProcessConfig{Name: "proc2", Command: "sleep 60"}
 
-	m.Start(cfg1, worktreePath)
-	m.Start(cfg2, worktreePath)
+	m.Start(cfg1, worktreePath, cfg1.Env)
+	m.Start(cfg2, worktreePath, cfg2.Env)
 
 	// Stop all
 	err := m.StopAll()
@@ -224,7 +224,7 @@ func TestProcessOutput(t *testing.T) {
 	}
 
 	// Start the process first
-	err := m.Start(cfg, worktreePath)
+	err := m.Start(cfg, worktreePath, cfg.Env)
 	if err != nil {
 		t.Fatalf("failed to start process: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestProcessWithEnv(t *testing.T) {
 	}
 
 	// Start the process first
-	err := m.Start(cfg, worktreePath)
+	err := m.Start(cfg, worktreePath, cfg.Env)
 	if err != nil {
 		t.Fatalf("failed to start process: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestProcessWithCwd(t *testing.T) {
 	}
 
 	// Start the process first
-	err := m.Start(cfg, worktreePath)
+	err := m.Start(cfg, worktreePath, cfg.Env)
 	if err != nil {
 		t.Fatalf("failed to start process: %v", err)
 	}
@@ -370,7 +370,7 @@ func TestLogFileCreation(t *testing.T) {
 		Command: "echo 'log test' && sleep 0.5",
 	}
 
-	err := m.Start(cfg, worktreePath)
+	err := m.Start(cfg, worktreePath, cfg.Env)
 	if err != nil {
 		t.Fatalf("failed to start process: %v", err)
 	}
@@ -429,7 +429,7 @@ func TestConcurrentAccess(t *testing.T) {
 				Name:    "concurrent-" + string(rune('a'+idx)),
 				Command: "sleep 60",
 			}
-			m.Start(cfg, worktreePath)
+			m.Start(cfg, worktreePath, cfg.Env)
 		}(i)
 	}
 	wg.Wait()

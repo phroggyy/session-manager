@@ -631,12 +631,14 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 
 	// Load configuration
 	var cfg *config.Config
+	var cfgPath string
 	var err error
 
 	if daemonConfigPath != "" {
 		cfg, err = config.Load(daemonConfigPath)
+		cfgPath = daemonConfigPath
 	} else {
-		cfg, _, err = config.Discover()
+		cfg, cfgPath, err = config.Discover()
 	}
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
@@ -663,7 +665,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create the daemon using the daemon package
-	d, err := daemon.New(sess, cfg, logger)
+	d, err := daemon.New(sess, cfg, cfgPath, logger)
 	if err != nil {
 		return fmt.Errorf("failed to create daemon: %w", err)
 	}

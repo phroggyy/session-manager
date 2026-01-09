@@ -1,6 +1,10 @@
 # Session Manager Configuration Example
 # Copy this file to sm.yaml in your repository root
 
+# Global environment file (applies to all processes)
+# Supports .envrc-style files with KEY=value, export KEY=value, quotes, and comments
+env_file: .envrc
+
 processes:
   # Web server process
   - name: web-server
@@ -14,6 +18,8 @@ processes:
   - name: frontend
     command: npm run dev
     cwd: ./frontend
+    # Process-specific env_file (overrides global, overridden by inline env)
+    env_file: ./frontend/.env
     env:
       VITE_API_URL: http://localhost:8080
 

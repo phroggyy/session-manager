@@ -43,7 +43,9 @@ func NewManager(logDir string, logger *zap.Logger) *Manager {
 }
 
 // Start starts a single process based on the provided configuration.
-func (m *Manager) Start(cfg config.ProcessConfig, worktreePath string) error {
+// The env parameter should contain the fully resolved environment variables
+// (merged from env_file and inline env settings).
+func (m *Manager) Start(cfg config.ProcessConfig, worktreePath string, env map[string]string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -63,7 +65,7 @@ func (m *Manager) Start(cfg config.ProcessConfig, worktreePath string) error {
 	}
 
 	// Create the process
-	proc := newProcess(cfg.Name, cfg.Command, cwd, worktreePath, cfg.Env)
+	proc := newProcess(cfg.Name, cfg.Command, cwd, worktreePath, env)
 
 	// Set up log file
 	if err := os.MkdirAll(m.logDir, 0755); err != nil {
@@ -83,7 +85,7 @@ func (m *Manager) Start(cfg config.ProcessConfig, worktreePath string) error {
 
 	// Set up environment
 	cmd.Env = os.Environ()
-	for key, value := range cfg.Env {
+	for key, value := range env {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", key, value))
 	}
 

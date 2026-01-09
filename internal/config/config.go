@@ -16,6 +16,7 @@ import (
 
 // Config represents the session manager configuration
 type Config struct {
+	EnvFile   string          `yaml:"env_file,omitempty" json:"env_file,omitempty"`
 	Processes []ProcessConfig `yaml:"processes" json:"processes"`
 }
 
@@ -24,6 +25,7 @@ type ProcessConfig struct {
 	Name    string            `yaml:"name" json:"name"`
 	Command string            `yaml:"command" json:"command"`
 	Cwd     string            `yaml:"cwd" json:"cwd"`
+	EnvFile string            `yaml:"env_file,omitempty" json:"env_file,omitempty"`
 	Env     map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
 }
 
@@ -173,4 +175,136 @@ func LoadFromJSON(data string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse JSON config: %w", err)
 	}
 	return &cfg, nil
+}
+
+// ParseEnvFile parses an envrc-style file and returns a map of environment variables.
+// Supports:
+//   - KEY=value
+//   - KEY="value with spaces"
+//   - KEY='value with spaces'
+//   - export KEY=value
+//   - Comments starting with #
+//   - Empty lines
+func ParseEnvFile(path string) (map[string]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read env file: %w", err)
+	}
+
+	env := make(map[string]string)
+	lines := strings.Split(string(data), "\n")
+
+	for lineNum, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Remove "export " prefix if present
+		line = strings.TrimPrefix(line, "export ")
+		line = strings.TrimSpace(line)
+
+		// Skip lines that don't look like assignments
+		if !strings.Contains(line, "=") {
+			continue
+		}
+
+		// Split on first =
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		// Validate key (must be valid env var name)
+		if key == "" || !isValidEnvKey(key) {
+			continue
+		}
+
+		// Remove surrounding quotes from value
+		value = unquote(value)
+
+		env[key] = value
+		_ = lineNum // Available for debug logging if needed
+	}
+
+	return env, nil
+}
+
+// isValidEnvKey checks if a string is a valid environment variable name
+func isValidEnvKey(key string) bool {
+	for i, r := range key {
+		if i == 0 {
+			if !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || r == '_') {
+				return false
+			}
+		} else {
+			if !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_') {
+				return false
+			}
+		}
+	}
+	return len(key) > 0
+}
+
+// unquote removes surrounding quotes from a string
+func unquote(s string) string {
+	if len(s) >= 2 {
+		if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
+}
+
+// GetEnv returns the merged environment variables for a process.
+// Priority (highest to lowest):
+//  1. Process-level env (ProcessConfig.Env)
+//  2. Process-level env_file (ProcessConfig.EnvFile)
+//  3. Global env_file (Config.EnvFile)
+//
+// The basePath is the directory containing the config file, used to resolve relative env_file paths.
+func (c *Config) GetEnv(proc ProcessConfig, basePath string) (map[string]string, error) {
+	env := make(map[string]string)
+
+	// Load global env_file first (lowest priority)
+	if c.EnvFile != "" {
+		envFilePath := c.EnvFile
+		if !filepath.IsAbs(envFilePath) {
+			envFilePath = filepath.Join(basePath, envFilePath)
+		}
+		fileEnv, err := ParseEnvFile(envFilePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load global env_file %q: %w", c.EnvFile, err)
+		}
+		for k, v := range fileEnv {
+			env[k] = v
+		}
+	}
+
+	// Load process-level env_file (medium priority)
+	if proc.EnvFile != "" {
+		envFilePath := proc.EnvFile
+		if !filepath.IsAbs(envFilePath) {
+			envFilePath = filepath.Join(basePath, envFilePath)
+		}
+		fileEnv, err := ParseEnvFile(envFilePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load env_file %q for process %q: %w", proc.EnvFile, proc.Name, err)
+		}
+		for k, v := range fileEnv {
+			env[k] = v
+		}
+	}
+
+	// Apply process-level env (highest priority)
+	for k, v := range proc.Env {
+		env[k] = v
+	}
+
+	return env, nil
 }
