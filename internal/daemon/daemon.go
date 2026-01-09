@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/leosjoberg/session-manager/internal/config"
-	"github.com/leosjoberg/session-manager/internal/process"
-	"github.com/leosjoberg/session-manager/internal/session"
-	"github.com/leosjoberg/session-manager/internal/worktree"
+	"github.com/phroggyy/session-manager/internal/config"
+	"github.com/phroggyy/session-manager/internal/process"
+	"github.com/phroggyy/session-manager/internal/session"
+	"github.com/phroggyy/session-manager/internal/worktree"
 	"go.uber.org/zap"
 )
 

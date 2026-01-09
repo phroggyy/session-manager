@@ -13,13 +13,13 @@ Session Manager allows you to define a set of processes (web servers, build watc
 ## Installation
 
 ```bash
-go install github.com/leosjoberg/session-manager/cmd/sm@latest
+go install github.com/phroggyy/session-manager/cmd/sm@latest
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/leosjoberg/session-manager.git
+git clone https://github.com/phroggyy/session-manager.git
 cd session-manager
 make build
 # Binary will be at ./bin/sm

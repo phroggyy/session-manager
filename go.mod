@@ -1,4 +1,4 @@
-module github.com/leosjoberg/session-manager
+module github.com/phroggyy/session-manager
 
 go 1.24.0
 

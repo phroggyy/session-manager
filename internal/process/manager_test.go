@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/leosjoberg/session-manager/internal/config"
+	"github.com/phroggyy/session-manager/internal/config"
 	"go.uber.org/zap"
 )
 
