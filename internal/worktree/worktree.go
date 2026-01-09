@@ -132,11 +132,8 @@ func Resolve(repoPath, target string) (*Worktree, error) {
 		return nil, err
 	}
 
-	// Clean up the target path if it looks like a path
-	targetPath := target
-	if filepath.IsAbs(target) || strings.Contains(target, string(filepath.Separator)) {
-		targetPath, _ = filepath.Abs(target)
-	}
+	// Convert target to absolute path for path matching
+	targetPath, _ := filepath.Abs(target)
 
 	// First, try to match by branch name
 	for i := range worktrees {
