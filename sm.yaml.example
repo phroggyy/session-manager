@@ -1,0 +1,30 @@
+# Session Manager Configuration Example
+# Copy this file to sm.yaml in your repository root
+
+processes:
+  # Web server process
+  - name: web-server
+    command: make run
+    cwd: ./server
+    env:
+      PORT: "8080"
+      DEBUG: "true"
+
+  # Frontend development server
+  - name: frontend
+    command: npm run dev
+    cwd: ./frontend
+    env:
+      VITE_API_URL: http://localhost:8080
+
+  # Database watcher (optional)
+  # - name: db-migrate
+  #   command: make watch-migrations
+  #   cwd: ./db
+
+  # Background worker (optional)
+  # - name: worker
+  #   command: go run ./cmd/worker
+  #   cwd: .
+  #   env:
+  #     WORKER_CONCURRENCY: "4"
