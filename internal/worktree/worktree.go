@@ -209,6 +209,24 @@ func FindRepoRoot(startPath string) (string, error) {
 	return root, nil
 }
 
+// FindMainWorktreePath returns the path to the main worktree, which is consistent
+// across all worktrees in the repository. This should be used for session identification.
+func FindMainWorktreePath(startPath string) (string, error) {
+	// First find any repo root so we can list worktrees
+	repoRoot, err := FindRepoRoot(startPath)
+	if err != nil {
+		return "", err
+	}
+
+	// Get the main worktree (first in the list)
+	mainWT, err := GetMainWorktree(repoRoot)
+	if err != nil {
+		return "", err
+	}
+
+	return mainWT.Path, nil
+}
+
 // GetMainWorktree returns the main (non-linked) worktree.
 // The main worktree is typically listed first in the worktree list.
 func GetMainWorktree(repoPath string) (*Worktree, error) {

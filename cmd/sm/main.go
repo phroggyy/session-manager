@@ -189,19 +189,19 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	logger.Debug("loaded config", zap.String("path", cfgPath), zap.Int("processes", len(cfg.Processes)))
 
-	// Find the repository root
+	// Find the main worktree path (consistent across all worktrees)
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("failed to get current directory: %w", err)
 	}
 
-	repoRoot, err := worktree.FindRepoRoot(cwd)
+	mainWorktreePath, err := worktree.FindMainWorktreePath(cwd)
 	if err != nil {
 		return fmt.Errorf("failed to find git repository: %w", err)
 	}
 
 	// Get or create session
-	sess, err := session.NewSession(repoRoot)
+	sess, err := session.NewSession(mainWorktreePath)
 	if err != nil {
 		return fmt.Errorf("failed to create session: %w", err)
 	}
@@ -216,7 +216,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	// Start daemon in background
 	logger.Info("starting daemon")
-	if err := startDaemon(repoRoot, cfgPath, socketPath); err != nil {
+	if err := startDaemon(mainWorktreePath, cfgPath, socketPath); err != nil {
 		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 
@@ -237,12 +237,12 @@ func runStop(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get current directory: %w", err)
 	}
 
-	repoRoot, err := worktree.FindRepoRoot(cwd)
+	mainWorktreePath, err := worktree.FindMainWorktreePath(cwd)
 	if err != nil {
 		return fmt.Errorf("failed to find git repository: %w", err)
 	}
 
-	sess, err := session.LoadSession(repoRoot)
+	sess, err := session.LoadSession(mainWorktreePath)
 	if err != nil {
 		return fmt.Errorf("no active session found: %w", err)
 	}
@@ -279,12 +279,12 @@ func runSwitch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get current directory: %w", err)
 	}
 
-	repoRoot, err := worktree.FindRepoRoot(cwd)
+	mainWorktreePath, err := worktree.FindMainWorktreePath(cwd)
 	if err != nil {
 		return fmt.Errorf("failed to find git repository: %w", err)
 	}
 
-	sess, err := session.LoadSession(repoRoot)
+	sess, err := session.LoadSession(mainWorktreePath)
 	if err != nil {
 		return fmt.Errorf("no active session found: %w", err)
 	}
@@ -320,12 +320,12 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get current directory: %w", err)
 	}
 
-	repoRoot, err := worktree.FindRepoRoot(cwd)
+	mainWorktreePath, err := worktree.FindMainWorktreePath(cwd)
 	if err != nil {
 		return fmt.Errorf("failed to find git repository: %w", err)
 	}
 
-	sess, err := session.LoadSession(repoRoot)
+	sess, err := session.LoadSession(mainWorktreePath)
 	if err != nil {
 		return fmt.Errorf("no active session found: %w", err)
 	}
@@ -387,12 +387,12 @@ func runAttach(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get current directory: %w", err)
 	}
 
-	repoRoot, err := worktree.FindRepoRoot(cwd)
+	mainWorktreePath, err := worktree.FindMainWorktreePath(cwd)
 	if err != nil {
 		return fmt.Errorf("failed to find git repository: %w", err)
 	}
 
-	sess, err := session.LoadSession(repoRoot)
+	sess, err := session.LoadSession(mainWorktreePath)
 	if err != nil {
 		return fmt.Errorf("no active session found: %w", err)
 	}
@@ -456,12 +456,12 @@ func runLogs(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get current directory: %w", err)
 	}
 
-	repoRoot, err := worktree.FindRepoRoot(cwd)
+	mainWorktreePath, err := worktree.FindMainWorktreePath(cwd)
 	if err != nil {
 		return fmt.Errorf("failed to find git repository: %w", err)
 	}
 
-	sess, err := session.LoadSession(repoRoot)
+	sess, err := session.LoadSession(mainWorktreePath)
 	if err != nil {
 		return fmt.Errorf("no active session found: %w", err)
 	}
