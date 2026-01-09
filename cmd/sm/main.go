@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -272,6 +273,16 @@ func runStop(cmd *cobra.Command, args []string) error {
 
 func runSwitch(cmd *cobra.Command, args []string) error {
 	target := args[0]
+
+	// If target looks like a path, resolve it to absolute before sending to daemon
+	// (daemon runs in a different working directory)
+	if target == "." || target == ".." || filepath.IsAbs(target) || strings.Contains(target, string(filepath.Separator)) {
+		absTarget, err := filepath.Abs(target)
+		if err == nil {
+			target = absTarget
+		}
+	}
+
 	logger.Debug("switching worktree", zap.String("target", target))
 
 	cwd, err := os.Getwd()
