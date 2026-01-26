@@ -9,10 +9,15 @@ import (
 
 // StatusBar represents the bottom status bar of the TUI.
 type StatusBar struct {
-	worktree    string
-	branch      string
-	status      string // "Running", "Switching...", "Stopped"
-	processInfo string // "3 processes running"
+	sessionName   string
+	sessionIndex  int
+	worktree      string
+	branch        string
+	status        string // "Running", "Switching...", "Stopped"
+	processInfo   string // "3 processes running"
+	ngrokCount    int    // Number of active ngrok tunnels
+	routedSession string // Name of session ngrok is routing to
+	ngrokURL      string // Public ngrok URL
 }
 
 // NewStatusBar creates a new StatusBar with default values.
@@ -36,8 +41,14 @@ func (s *StatusBar) View(width int) string {
 		baseStyle = StatusBarStyle.Width(width)
 	}
 
-	// Left section: worktree and branch info
+	// Left section: session info, worktree and branch info
 	leftParts := []string{}
+
+	// Session badge [name:index]
+	if s.sessionName != "" {
+		sessionBadge := SessionBadgeStyle.Render(fmt.Sprintf("[%s:%d]", s.sessionName, s.sessionIndex))
+		leftParts = append(leftParts, sessionBadge)
+	}
 
 	if s.worktree != "" {
 		worktreeText := WorktreeStyle.Render(s.worktree)
@@ -62,11 +73,24 @@ func (s *StatusBar) View(width int) string {
 		statusText = StatusStoppedStyle.Render("○ " + s.status)
 	}
 
-	// Right section: process info and help
-	right := ""
-	if s.processInfo != "" {
-		right = ProcessCountStyle.Render(s.processInfo)
+	// Right section: ngrok routing info, process info
+	rightParts := []string{}
+	if s.routedSession != "" {
+		// Show which session is being routed
+		routeText := fmt.Sprintf("🌐 → %s", s.routedSession)
+		rightParts = append(rightParts, NgrokIndicatorStyle.Render(routeText))
+	} else if s.ngrokCount > 0 {
+		// Fallback to tunnel count if no routing info
+		ngrokText := fmt.Sprintf("🌐 %d tunnel", s.ngrokCount)
+		if s.ngrokCount != 1 {
+			ngrokText += "s"
+		}
+		rightParts = append(rightParts, NgrokIndicatorStyle.Render(ngrokText))
 	}
+	if s.processInfo != "" {
+		rightParts = append(rightParts, ProcessCountStyle.Render(s.processInfo))
+	}
+	right := strings.Join(rightParts, " ")
 
 	// Calculate available space
 	leftWidth := lipgloss.Width(left)
@@ -140,4 +164,25 @@ func (s *StatusBar) SetProcessCount(count int) {
 		s.processInfo += "es"
 	}
 	s.processInfo += " running"
+}
+
+// SetSession updates the session name and index.
+func (s *StatusBar) SetSession(name string, index int) {
+	s.sessionName = name
+	s.sessionIndex = index
+}
+
+// SetNgrokCount updates the ngrok tunnel count.
+func (s *StatusBar) SetNgrokCount(count int) {
+	s.ngrokCount = count
+}
+
+// SetRoutedSession updates the name of the session ngrok is routing to.
+func (s *StatusBar) SetRoutedSession(name string) {
+	s.routedSession = name
+}
+
+// SetNgrokURL updates the public ngrok URL.
+func (s *StatusBar) SetNgrokURL(url string) {
+	s.ngrokURL = url
 }

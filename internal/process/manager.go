@@ -8,25 +8,35 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/phroggyy/session-manager/internal/config"
+	"github.com/shirou/gopsutil/v4/net"
+	gopsprocess "github.com/shirou/gopsutil/v4/process"
 	"go.uber.org/zap"
 )
 
 const (
 	// gracefulShutdownTimeout is the time to wait for SIGTERM before sending SIGKILL.
 	gracefulShutdownTimeout = 5 * time.Second
+	// portDetectionInterval is how often to poll for listening ports.
+	portDetectionInterval = 2 * time.Second
 )
+
+// PortChangeCallback is called when a process's listening ports change.
+type PortChangeCallback func(processName string, ports []uint32)
 
 // Manager handles lifecycle management of multiple processes.
 type Manager struct {
-	processes map[string]*Process
-	logDir    string
-	mu        sync.RWMutex
-	logger    *zap.Logger
+	processes      map[string]*Process
+	logDir         string
+	mu             sync.RWMutex
+	logger         *zap.Logger
+	portCallback   PortChangeCallback
+	portDetectStop map[string]chan struct{}
 }
 
 // NewManager creates a new process manager with the specified log directory.
@@ -36,10 +46,18 @@ func NewManager(logDir string, logger *zap.Logger) *Manager {
 	}
 
 	return &Manager{
-		processes: make(map[string]*Process),
-		logDir:    logDir,
-		logger:    logger,
+		processes:      make(map[string]*Process),
+		logDir:         logDir,
+		logger:         logger,
+		portDetectStop: make(map[string]chan struct{}),
 	}
+}
+
+// SetPortChangeCallback sets the callback function invoked when a process's ports change.
+func (m *Manager) SetPortChangeCallback(cb PortChangeCallback) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.portCallback = cb
 }
 
 // Start starts a single process based on the provided configuration.
@@ -136,6 +154,9 @@ func (m *Manager) Start(cfg config.ProcessConfig, worktreePath string, env map[s
 
 	// Monitor process exit
 	go m.monitorProcess(proc)
+
+	// Start port detection
+	go m.detectPorts(proc)
 
 	return nil
 }
@@ -245,12 +266,27 @@ func (m *Manager) Stop(name string) error {
 		zap.Int("pid", pid),
 	)
 
-	// Send SIGTERM to process group
-	if err := m.signalProcessGroup(pid, syscall.SIGTERM); err != nil {
-		m.logger.Debug("failed to send SIGTERM",
-			zap.String("name", name),
-			zap.Error(err),
-		)
+	// Get all PIDs in the process tree (includes children with different PGIDs)
+	allPIDs := m.getProcessTree(int32(pid))
+
+	// Collect unique PGIDs to signal
+	pgids := m.getUniquePGIDs(allPIDs)
+
+	m.logger.Debug("stopping process tree",
+		zap.String("name", name),
+		zap.Int("root_pid", pid),
+		zap.Int("total_processes", len(allPIDs)),
+		zap.Int("unique_pgids", len(pgids)),
+	)
+
+	// Send SIGTERM to all process groups
+	for _, pgid := range pgids {
+		if err := m.signalProcessGroup(int(pgid), syscall.SIGTERM); err != nil {
+			m.logger.Debug("failed to send SIGTERM to process group",
+				zap.Int32("pgid", pgid),
+				zap.Error(err),
+			)
+		}
 	}
 
 	// Wait for process to exit or timeout
@@ -263,9 +299,14 @@ func (m *Manager) Stop(name string) error {
 			zap.Int("pid", pid),
 		)
 
-		// Send SIGKILL to process group
-		if err := m.signalProcessGroup(pid, syscall.SIGKILL); err != nil {
-			return fmt.Errorf("failed to kill process %q: %w", name, err)
+		// Send SIGKILL to all process groups
+		for _, pgid := range pgids {
+			if err := m.signalProcessGroup(int(pgid), syscall.SIGKILL); err != nil {
+				m.logger.Debug("failed to send SIGKILL to process group",
+					zap.Int32("pgid", pgid),
+					zap.Error(err),
+				)
+			}
 		}
 
 		// Wait a bit for the process to die
@@ -276,6 +317,24 @@ func (m *Manager) Stop(name string) error {
 			return fmt.Errorf("process %q did not exit after SIGKILL", name)
 		}
 	}
+}
+
+// getUniquePGIDs returns unique process group IDs for a list of PIDs.
+func (m *Manager) getUniquePGIDs(pids []int32) []int32 {
+	pgidMap := make(map[int32]struct{})
+	for _, pid := range pids {
+		pgid, err := getProcessGroupID(pid)
+		if err != nil {
+			continue
+		}
+		pgidMap[pgid] = struct{}{}
+	}
+
+	pgids := make([]int32, 0, len(pgidMap))
+	for pgid := range pgidMap {
+		pgids = append(pgids, pgid)
+	}
+	return pgids
 }
 
 // signalProcessGroup sends a signal to the entire process group.
@@ -351,4 +410,142 @@ func (m *Manager) Subscribe(name string) (<-chan []byte, func()) {
 	}
 
 	return ch, unsubscribe
+}
+
+// detectPorts polls for listening ports on a process and calls the callback when they change.
+func (m *Manager) detectPorts(proc *Process) {
+	// Create stop channel for this process
+	stopCh := make(chan struct{})
+	m.mu.Lock()
+	m.portDetectStop[proc.Name] = stopCh
+	m.mu.Unlock()
+
+	defer func() {
+		m.mu.Lock()
+		delete(m.portDetectStop, proc.Name)
+		m.mu.Unlock()
+	}()
+
+	ticker := time.NewTicker(portDetectionInterval)
+	defer ticker.Stop()
+
+	var lastPorts []uint32
+
+	for {
+		select {
+		case <-stopCh:
+			return
+		case <-proc.done:
+			return
+		case <-ticker.C:
+			ports := m.getListeningPorts(proc.PID)
+
+			// Check if ports changed
+			if !portsEqual(lastPorts, ports) {
+				lastPorts = ports
+
+				m.mu.Lock()
+				proc.Ports = ports
+				callback := m.portCallback
+				m.mu.Unlock()
+
+				if callback != nil {
+					callback(proc.Name, ports)
+				}
+			}
+		}
+	}
+}
+
+// getListeningPorts returns all listening TCP ports for a given PID and all its descendants.
+func (m *Manager) getListeningPorts(pid int) []uint32 {
+	if pid <= 0 {
+		return nil
+	}
+
+	// Collect all PIDs in the process tree (parent + all descendants)
+	pids := m.getProcessTree(int32(pid))
+
+	portMap := make(map[uint32]struct{})
+	for _, p := range pids {
+		connections, err := net.ConnectionsPid("all", p)
+		if err != nil {
+			m.logger.Debug("failed to get connections for process",
+				zap.Int32("pid", p),
+				zap.Error(err),
+			)
+			continue
+		}
+
+		for _, conn := range connections {
+			if conn.Status == "LISTEN" {
+				portMap[conn.Laddr.Port] = struct{}{}
+			}
+		}
+	}
+
+	ports := make([]uint32, 0, len(portMap))
+	for port := range portMap {
+		ports = append(ports, port)
+	}
+	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+
+	return ports
+}
+
+// getProcessTree returns all PIDs in the process group rooted at the given PID.
+// Since we start processes with Setpgid: true, the PGID equals the root PID,
+// and all descendants share this PGID regardless of how deep the process tree goes.
+func (m *Manager) getProcessTree(rootPID int32) []int32 {
+	// The PGID should equal rootPID since we set Setpgid: true when starting
+	targetPGID := rootPID
+
+	// Get all processes on the system
+	allProcs, err := gopsprocess.Processes()
+	if err != nil {
+		m.logger.Debug("failed to list processes", zap.Error(err))
+		return []int32{rootPID}
+	}
+
+	var pids []int32
+	for _, proc := range allProcs {
+		// Get the process group ID for this process
+		pgid, err := getProcessGroupID(proc.Pid)
+		if err != nil {
+			continue
+		}
+
+		if pgid == targetPGID {
+			pids = append(pids, proc.Pid)
+		}
+	}
+
+	// If we found nothing (shouldn't happen), at least return the root
+	if len(pids) == 0 {
+		return []int32{rootPID}
+	}
+
+	return pids
+}
+
+// getProcessGroupID returns the process group ID for a given PID.
+func getProcessGroupID(pid int32) (int32, error) {
+	pgid, err := syscall.Getpgid(int(pid))
+	if err != nil {
+		return 0, err
+	}
+	return int32(pgid), nil
+}
+
+// portsEqual compares two port slices for equality.
+func portsEqual(a, b []uint32) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

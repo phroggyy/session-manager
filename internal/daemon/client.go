@@ -10,20 +10,32 @@ import (
 
 // StatusResponse contains the current status of the daemon.
 type StatusResponse struct {
-	SessionID       string          `json:"session_id"`
-	RepoPath        string          `json:"repo_path"`
-	CurrentWorktree string          `json:"current_worktree"`
-	CurrentBranch   string          `json:"current_branch"`
-	Processes       []ProcessStatus `json:"processes"`
-	Running         bool            `json:"running"`
+	SessionID       string              `json:"session_id"`
+	SessionName     string              `json:"session_name"`
+	SessionIndex    int                 `json:"session_index"`
+	RepoPath        string              `json:"repo_path"`
+	CurrentWorktree string              `json:"current_worktree"`
+	CurrentBranch   string              `json:"current_branch"`
+	Processes       []ProcessStatus     `json:"processes"`
+	NgrokTunnels    []NgrokTunnelStatus `json:"ngrok_tunnels,omitempty"`
+	RoutedSession   string              `json:"routed_session,omitempty"`
+	Running         bool                `json:"running"`
 }
 
 // ProcessStatus contains the status of a single process.
 type ProcessStatus struct {
-	Name      string `json:"name"`
-	Status    string `json:"status"`
-	PID       int    `json:"pid"`
-	StartedAt string `json:"started_at,omitempty"`
+	Name      string   `json:"name"`
+	Status    string   `json:"status"`
+	PID       int      `json:"pid"`
+	StartedAt string   `json:"started_at,omitempty"`
+	Ports     []uint32 `json:"ports,omitempty"`
+}
+
+// NgrokTunnelStatus contains the status of an ngrok tunnel.
+type NgrokTunnelStatus struct {
+	Port      int    `json:"port"`
+	PublicURL string `json:"public_url"`
+	Subdomain string `json:"subdomain,omitempty"`
 }
 
 // Client communicates with the daemon over a Unix socket.
@@ -158,18 +170,51 @@ func (c *Client) sendRequest(method string, params any) (*Response, error) {
 }
 
 // Switch requests the daemon to switch to a different worktree.
-func (c *Client) Switch(target string) error {
+// Returns the resolved worktree path on success.
+func (c *Client) Switch(target string) (string, error) {
 	params := SwitchParams{Target: target}
 	resp, err := c.sendRequest("switch", params)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	if resp.Error != "" {
-		return fmt.Errorf("%s", resp.Error)
+		return "", fmt.Errorf("%s", resp.Error)
 	}
 
-	return nil
+	// Extract worktree path from response
+	var worktreePath string
+	if result, ok := resp.Result.(map[string]interface{}); ok {
+		if wt, ok := result["worktree"].(string); ok {
+			worktreePath = wt
+		}
+	}
+
+	return worktreePath, nil
+}
+
+// Route requests the daemon to route ngrok to a specific session's port.
+// Returns the public URL on success.
+func (c *Client) Route(sessionName string, port int) (string, error) {
+	params := RouteParams{SessionName: sessionName, Port: port}
+	resp, err := c.sendRequest("route", params)
+	if err != nil {
+		return "", err
+	}
+
+	if resp.Error != "" {
+		return "", fmt.Errorf("%s", resp.Error)
+	}
+
+	// Extract public URL from response
+	var publicURL string
+	if result, ok := resp.Result.(map[string]interface{}); ok {
+		if url, ok := result["public_url"].(string); ok {
+			publicURL = url
+		}
+	}
+
+	return publicURL, nil
 }
 
 // Stop requests the daemon to stop all processes and shut down.

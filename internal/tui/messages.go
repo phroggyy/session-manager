@@ -14,10 +14,18 @@ type SwitchMsg struct {
 	NewBranch   string
 }
 
+// RouteMsg is sent when ngrok routing changes.
+type RouteMsg struct {
+	SessionName string
+	Port        int
+	PublicURL   string
+}
+
 // ProcessStatusMsg is sent when a process status changes.
 type ProcessStatusMsg struct {
 	Name   string
 	Status string
+	Ports  []uint32
 }
 
 // ErrorMsg is sent when an error occurs.

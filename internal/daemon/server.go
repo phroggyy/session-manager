@@ -127,8 +127,9 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		delete(s.clients, conn)
 		s.clientsMu.Unlock()
 
-		// Unsubscribe if subscribed
+		// Unsubscribe if subscribed - remove from daemon first, then close
 		if client.subscribed {
+			s.daemon.removeSubscriber(client.eventCh)
 			close(client.eventCh)
 		}
 	}()
@@ -178,6 +179,8 @@ func (s *Server) handleRequest(ctx context.Context, client *clientConn, req *Req
 		return s.handleStop()
 	case "status":
 		return s.handleStatus()
+	case "route":
+		return s.handleRoute(req)
 	case "subscribe":
 		return s.handleSubscribe(ctx, client)
 	default:
@@ -201,13 +204,48 @@ func (s *Server) handleSwitch(req *Request) Response {
 		return Response{Error: "target is required"}
 	}
 
-	if err := s.daemon.Switch(params.Target); err != nil {
+	worktreePath, err := s.daemon.Switch(params.Target)
+	if err != nil {
 		return Response{Error: err.Error()}
 	}
 
 	return Response{Result: map[string]interface{}{
-		"success": true,
-		"message": fmt.Sprintf("switched to %s", params.Target),
+		"success":  true,
+		"message":  fmt.Sprintf("switched to %s", params.Target),
+		"worktree": worktreePath,
+	}}
+}
+
+// RouteParams contains the parameters for a route request.
+type RouteParams struct {
+	SessionName string `json:"session_name"`
+	Port        int    `json:"port"`
+}
+
+// handleRoute handles a request to route ngrok to a session.
+func (s *Server) handleRoute(req *Request) Response {
+	var params RouteParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return Response{Error: fmt.Sprintf("invalid params: %v", err)}
+	}
+
+	if params.SessionName == "" {
+		return Response{Error: "session_name is required"}
+	}
+	if params.Port <= 0 {
+		return Response{Error: "port is required and must be positive"}
+	}
+
+	publicURL, err := s.daemon.Route(params.SessionName, params.Port)
+	if err != nil {
+		return Response{Error: err.Error()}
+	}
+
+	return Response{Result: map[string]interface{}{
+		"success":      true,
+		"session_name": params.SessionName,
+		"port":         params.Port,
+		"public_url":   publicURL,
 	}}
 }
 

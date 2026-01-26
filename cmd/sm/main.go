@@ -27,10 +27,11 @@ import (
 )
 
 var (
-	verbose    bool
-	configPath string
-	follow     bool
-	logger     *zap.Logger
+	verbose      bool
+	configPath   string
+	follow       bool
+	sessionFlag  string // Branch name or worktree path to identify session
+	logger       *zap.Logger
 )
 
 var rootCmd = &cobra.Command{
@@ -102,6 +103,41 @@ var logsCmd = &cobra.Command{
 	RunE:  runLogs,
 }
 
+var addCmd = &cobra.Command{
+	Use:   "add [target]",
+	Short: "Add a new session for a worktree",
+	Long: `Add a new session for a worktree. The session will be associated
+with the specified worktree (by branch name or path). If no target is specified,
+the current directory's worktree is used.
+
+Sessions are identified by their worktree path. You can reference them by branch name.
+Each session gets a unique index (0, 1, 2, ...) that can be used in config templates.`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runAdd,
+}
+
+var sessionsCmd = &cobra.Command{
+	Use:     "sessions",
+	Aliases: []string{"list-sessions"},
+	Short:   "List all sessions for this repository",
+	Long:    `List all registered sessions for the current repository, showing their names, indices, and associated worktrees.`,
+	RunE:    runSessions,
+}
+
+var routeCmd = &cobra.Command{
+	Use:   "route <session>",
+	Short: "Route ngrok tunnel to a session",
+	Long: `Route the ngrok tunnel to a specific session's port. This restarts
+the ngrok process pointing to the target session's port as defined in the config.
+
+You can specify a session by:
+  - Name: 'sm route myname'
+  - Current worktree: 'sm route .'
+  - Path to worktree: 'sm route /path/to/worktree'`,
+	Args: cobra.ExactArgs(1),
+	RunE: runRoute,
+}
+
 // daemonCmd is a hidden command used internally to run the daemon process
 var daemonCmd = &cobra.Command{
 	Use:    "daemon",
@@ -112,32 +148,52 @@ var daemonCmd = &cobra.Command{
 
 // Daemon flags
 var (
-	daemonRepoPath   string
-	daemonSocketPath string
-	daemonConfigPath string
+	daemonRepoPath     string
+	daemonSocketPath   string
+	daemonConfigPath   string
+	daemonSessionIndex int
+	daemonWorktreePath string
 )
 
 func init() {
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose/debug logging")
 
 	startCmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to config file")
+	startCmd.Flags().StringVarP(&sessionFlag, "session", "s", "", "Branch name or worktree path (default: current worktree)")
 	rootCmd.AddCommand(startCmd)
 
+	stopCmd.Flags().StringVarP(&sessionFlag, "session", "s", "", "Branch name or worktree path (default: current worktree)")
 	rootCmd.AddCommand(stopCmd)
+
+	switchCmd.Flags().StringVarP(&sessionFlag, "session", "s", "", "Branch name or worktree path (default: current worktree)")
 	rootCmd.AddCommand(switchCmd)
+
+	statusCmd.Flags().StringVarP(&sessionFlag, "session", "s", "", "Branch name or worktree path (default: current worktree)")
 	rootCmd.AddCommand(statusCmd)
+
+	attachCmd.Flags().StringVarP(&sessionFlag, "session", "s", "", "Branch name or worktree path (default: current worktree)")
 	rootCmd.AddCommand(attachCmd)
+
 	rootCmd.AddCommand(listCmd)
 
 	logsCmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow log output")
+	logsCmd.Flags().StringVarP(&sessionFlag, "session", "s", "", "Branch name or worktree path (default: current worktree)")
 	rootCmd.AddCommand(logsCmd)
+
+	// Commands for multi-session support
+	rootCmd.AddCommand(addCmd)
+	rootCmd.AddCommand(sessionsCmd)
+	rootCmd.AddCommand(routeCmd)
 
 	// Hidden daemon command
 	daemonCmd.Flags().StringVar(&daemonRepoPath, "repo", "", "Repository path")
 	daemonCmd.Flags().StringVar(&daemonSocketPath, "socket", "", "Socket path")
 	daemonCmd.Flags().StringVar(&daemonConfigPath, "config", "", "Config file path")
+	daemonCmd.Flags().IntVar(&daemonSessionIndex, "session-index", 0, "Session index")
+	daemonCmd.Flags().StringVar(&daemonWorktreePath, "worktree", "", "Worktree path for the session")
 	daemonCmd.MarkFlagRequired("repo")
 	daemonCmd.MarkFlagRequired("socket")
+	daemonCmd.MarkFlagRequired("worktree")
 	rootCmd.AddCommand(daemonCmd)
 }
 
@@ -166,9 +222,29 @@ func initLogger() {
 	}
 }
 
-func runStart(cmd *cobra.Command, args []string) error {
-	logger.Debug("starting session manager")
+// resolveWorktree resolves the -s flag or current directory to a worktree path and branch.
+func resolveWorktree(registry *session.Registry, mainWorktreePath, cwd string) (worktreePath, branch string, err error) {
+	if sessionFlag != "" {
+		// Try to find existing session by branch name first
+		if entry := registry.FindSessionByBranch(sessionFlag); entry != nil {
+			return entry.Worktree, entry.Branch, nil
+		}
+		// Try to resolve as a worktree path or branch name
+		wt, err := worktree.Resolve(mainWorktreePath, sessionFlag)
+		if err != nil {
+			return "", "", fmt.Errorf("failed to resolve %q as branch or worktree: %w", sessionFlag, err)
+		}
+		return wt.Path, wt.Branch, nil
+	}
+	// Default to current worktree
+	currentWt, err := worktree.Current()
+	if err != nil {
+		return cwd, "", nil
+	}
+	return currentWt.Path, currentWt.Branch, nil
+}
 
+func runStart(cmd *cobra.Command, args []string) error {
 	// Load or discover configuration
 	var cfg *config.Config
 	var cfgPath string
@@ -201,13 +277,34 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to find git repository: %w", err)
 	}
 
-	// Get or create session
-	sess, err := session.NewSession(mainWorktreePath)
+	// Load or create registry
+	registry, err := session.LoadRegistry(mainWorktreePath)
 	if err != nil {
-		return fmt.Errorf("failed to create session: %w", err)
+		return fmt.Errorf("failed to load session registry: %w", err)
 	}
 
-	socketPath := sess.GetSocketPath()
+	// Resolve worktree from flag or current directory
+	worktreePath, branch, err := resolveWorktree(registry, mainWorktreePath, cwd)
+	if err != nil {
+		return err
+	}
+
+	logger.Debug("starting session manager", zap.String("worktree", worktreePath), zap.String("branch", branch))
+
+	// Get or create session entry in registry
+	entry, exists := registry.GetSession(worktreePath)
+	if !exists {
+		entry, err = registry.AddSession(worktreePath, branch)
+		if err != nil {
+			return fmt.Errorf("failed to create session: %w", err)
+		}
+		if err := registry.Save(); err != nil {
+			return fmt.Errorf("failed to save registry: %w", err)
+		}
+	}
+
+	socketPath := registry.GetSessionSocketPath(worktreePath)
+	sessionDir := registry.GetSessionDir(worktreePath)
 
 	// Check if daemon is already running
 	if isDaemonRunning(socketPath) {
@@ -216,8 +313,8 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// Start daemon in background
-	logger.Info("starting daemon")
-	if err := startDaemon(mainWorktreePath, cfgPath, socketPath); err != nil {
+	logger.Info("starting daemon", zap.String("worktree", entry.Worktree), zap.Int("index", entry.Index))
+	if err := startDaemonForWorktree(mainWorktreePath, cfgPath, socketPath, sessionDir, entry.Index, entry.Worktree); err != nil {
 		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 
@@ -243,15 +340,29 @@ func runStop(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to find git repository: %w", err)
 	}
 
-	sess, err := session.LoadSession(mainWorktreePath)
+	// Load registry to find session
+	registry, err := session.LoadRegistry(mainWorktreePath)
 	if err != nil {
-		return fmt.Errorf("no active session found: %w", err)
+		return fmt.Errorf("failed to load session registry: %w", err)
 	}
 
-	socketPath := sess.GetSocketPath()
+	// Resolve worktree from flag or current directory
+	worktreePath, _, err := resolveWorktree(registry, mainWorktreePath, cwd)
+	if err != nil {
+		return err
+	}
+
+	// Check if session exists
+	entry := registry.FindSessionByWorktree(worktreePath)
+	if entry == nil {
+		fmt.Printf("No session found for worktree %q\n", worktreePath)
+		return nil
+	}
+
+	socketPath := registry.GetSessionSocketPath(worktreePath)
 
 	if !isDaemonRunning(socketPath) {
-		fmt.Println("No daemon running")
+		fmt.Printf("No daemon running for worktree %q\n", worktreePath)
 		return nil
 	}
 
@@ -267,7 +378,20 @@ func runStop(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to stop daemon: %w", err)
 	}
 
-	fmt.Println("Session manager stopped")
+	// Remove session from registry
+	if err := registry.RemoveSession(worktreePath); err != nil {
+		logger.Warn("failed to remove session from registry", zap.Error(err))
+	} else {
+		if err := registry.Save(); err != nil {
+			logger.Warn("failed to save registry", zap.Error(err))
+		}
+	}
+
+	branchInfo := ""
+	if entry.Branch != "" {
+		branchInfo = fmt.Sprintf(" (branch: %s)", entry.Branch)
+	}
+	fmt.Printf("Session stopped and removed%s\n", branchInfo)
 	return nil
 }
 
@@ -275,7 +399,6 @@ func runSwitch(cmd *cobra.Command, args []string) error {
 	target := args[0]
 
 	// If target looks like a path, resolve it to absolute before sending to daemon
-	// (daemon runs in a different working directory)
 	if target == "." || target == ".." || filepath.IsAbs(target) || strings.Contains(target, string(filepath.Separator)) {
 		absTarget, err := filepath.Abs(target)
 		if err == nil {
@@ -295,15 +418,28 @@ func runSwitch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to find git repository: %w", err)
 	}
 
-	sess, err := session.LoadSession(mainWorktreePath)
+	// Load registry to find session
+	registry, err := session.LoadRegistry(mainWorktreePath)
 	if err != nil {
-		return fmt.Errorf("no active session found: %w", err)
+		return fmt.Errorf("failed to load session registry: %w", err)
 	}
 
-	socketPath := sess.GetSocketPath()
+	// Resolve worktree from flag or current directory
+	currentWorktree, _, err := resolveWorktree(registry, mainWorktreePath, cwd)
+	if err != nil {
+		return err
+	}
+
+	// Check if session exists
+	entry := registry.FindSessionByWorktree(currentWorktree)
+	if entry == nil {
+		return fmt.Errorf("no session found for current worktree, start one first with 'sm start'")
+	}
+
+	socketPath := registry.GetSessionSocketPath(currentWorktree)
 
 	if !isDaemonRunning(socketPath) {
-		return fmt.Errorf("no daemon running, start session first with 'sm start'")
+		return fmt.Errorf("no daemon running, start it first with 'sm start'")
 	}
 
 	// Connect to daemon using client
@@ -315,8 +451,24 @@ func runSwitch(cmd *cobra.Command, args []string) error {
 
 	// Send switch command
 	fmt.Printf("Switching to %s...\n", target)
-	if err := client.Switch(target); err != nil {
+	newWorktreePath, err := client.Switch(target)
+	if err != nil {
 		return fmt.Errorf("switch failed: %w", err)
+	}
+
+	// Update registry with the new branch if worktree changed
+	if newWorktreePath != "" {
+		// Resolve the new worktree to get branch info
+		wt, err := worktree.Resolve(mainWorktreePath, newWorktreePath)
+		if err == nil && wt.Branch != "" {
+			if err := registry.UpdateSessionBranch(currentWorktree, wt.Branch); err != nil {
+				logger.Warn("failed to update session branch in registry", zap.Error(err))
+			} else {
+				if err := registry.Save(); err != nil {
+					logger.Warn("failed to save registry", zap.Error(err))
+				}
+			}
+		}
 	}
 
 	fmt.Printf("Switched to %s\n", target)
@@ -336,26 +488,42 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to find git repository: %w", err)
 	}
 
-	sess, err := session.LoadSession(mainWorktreePath)
+	// Load registry to find session
+	registry, err := session.LoadRegistry(mainWorktreePath)
 	if err != nil {
-		return fmt.Errorf("no active session found: %w", err)
+		return fmt.Errorf("failed to load session registry: %w", err)
 	}
 
-	socketPath := sess.GetSocketPath()
+	// Resolve worktree from flag or current directory
+	worktreePath, _, err := resolveWorktree(registry, mainWorktreePath, cwd)
+	if err != nil {
+		return err
+	}
+
+	// Check if session exists
+	entry := registry.FindSessionByWorktree(worktreePath)
+	if entry == nil {
+		return fmt.Errorf("no session found for worktree %q", worktreePath)
+	}
+
+	// Load the session to get state
+	sess, err := session.LoadSessionForWorktree(mainWorktreePath, worktreePath)
+	if err != nil {
+		return fmt.Errorf("failed to load session: %w", err)
+	}
+
+	socketPath := registry.GetSessionSocketPath(worktreePath)
 	state := sess.GetState()
 
 	// Print status header
+	fmt.Printf("Worktree:   %s\n", entry.Worktree)
+	if entry.Branch != "" {
+		fmt.Printf("Branch:     %s\n", entry.Branch)
+	}
+	fmt.Printf("Index:      %d\n", entry.Index)
 	fmt.Printf("Session ID: %s\n", state.ID)
 	fmt.Printf("Repository: %s\n", state.RepoPath)
 	fmt.Printf("Started:    %s\n", state.StartedAt)
-	fmt.Println()
-
-	if state.CurrentWorktree != "" {
-		fmt.Printf("Worktree:   %s\n", state.CurrentWorktree)
-	}
-	if state.CurrentBranch != "" {
-		fmt.Printf("Branch:     %s\n", state.CurrentBranch)
-	}
 	fmt.Println()
 
 	// Check daemon status
@@ -403,15 +571,28 @@ func runAttach(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to find git repository: %w", err)
 	}
 
-	sess, err := session.LoadSession(mainWorktreePath)
+	// Load registry to find session
+	registry, err := session.LoadRegistry(mainWorktreePath)
 	if err != nil {
-		return fmt.Errorf("no active session found: %w", err)
+		return fmt.Errorf("failed to load session registry: %w", err)
 	}
 
-	socketPath := sess.GetSocketPath()
+	// Resolve worktree from flag or current directory
+	worktreePath, _, err := resolveWorktree(registry, mainWorktreePath, cwd)
+	if err != nil {
+		return err
+	}
+
+	// Check if session exists
+	entry := registry.FindSessionByWorktree(worktreePath)
+	if entry == nil {
+		return fmt.Errorf("no session found, start one first with 'sm start'")
+	}
+
+	socketPath := registry.GetSessionSocketPath(worktreePath)
 
 	if !isDaemonRunning(socketPath) {
-		return fmt.Errorf("no daemon running, start session first with 'sm start'")
+		return fmt.Errorf("no daemon running, start it first with 'sm start'")
 	}
 
 	return attachTUI(socketPath)
@@ -472,9 +653,28 @@ func runLogs(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to find git repository: %w", err)
 	}
 
-	sess, err := session.LoadSession(mainWorktreePath)
+	// Load registry to find session
+	registry, err := session.LoadRegistry(mainWorktreePath)
 	if err != nil {
-		return fmt.Errorf("no active session found: %w", err)
+		return fmt.Errorf("failed to load session registry: %w", err)
+	}
+
+	// Resolve worktree from flag or current directory
+	worktreePath, _, err := resolveWorktree(registry, mainWorktreePath, cwd)
+	if err != nil {
+		return err
+	}
+
+	// Check if session exists
+	entry := registry.FindSessionByWorktree(worktreePath)
+	if entry == nil {
+		return fmt.Errorf("no session found for worktree %q", worktreePath)
+	}
+
+	// Load session to get log directory
+	sess, err := session.LoadSessionForWorktree(mainWorktreePath, worktreePath)
+	if err != nil {
+		return fmt.Errorf("failed to load session: %w", err)
 	}
 
 	logDir := sess.GetLogDir()
@@ -499,6 +699,319 @@ func runLogs(cmd *cobra.Command, args []string) error {
 	return err
 }
 
+func runAdd(cmd *cobra.Command, args []string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	mainWorktreePath, err := worktree.FindMainWorktreePath(cwd)
+	if err != nil {
+		return fmt.Errorf("failed to find git repository: %w", err)
+	}
+
+	// Determine target based on args
+	var target string
+	switch len(args) {
+	case 0:
+		// sm add - use current worktree
+		target = "."
+	case 1:
+		// sm add <target> - worktree target (branch name or path)
+		target = args[0]
+	}
+
+	// Resolve the target worktree
+	var worktreePath string
+	var branch string
+	if target == "." {
+		// Use current worktree
+		currentWt, err := worktree.Current()
+		if err != nil {
+			worktreePath = cwd
+		} else {
+			worktreePath = currentWt.Path
+			branch = currentWt.Branch
+		}
+	} else {
+		// Resolve target to a worktree
+		wt, err := worktree.Resolve(mainWorktreePath, target)
+		if err != nil {
+			return fmt.Errorf("failed to resolve worktree %q: %w", target, err)
+		}
+		worktreePath = wt.Path
+		branch = wt.Branch
+	}
+
+	logger.Debug("adding session", zap.String("worktree", worktreePath), zap.String("branch", branch))
+
+	// Load or create registry
+	registry, err := session.LoadRegistry(mainWorktreePath)
+	if err != nil {
+		return fmt.Errorf("failed to load session registry: %w", err)
+	}
+
+	// Check if session already exists
+	var entry *session.SessionEntry
+	existingEntry := registry.FindSessionByWorktree(worktreePath)
+	if existingEntry != nil {
+		entry = existingEntry
+		branchInfo := ""
+		if entry.Branch != "" {
+			branchInfo = fmt.Sprintf(" (branch: %s)", entry.Branch)
+		}
+		fmt.Printf("Session already exists%s (index %d)\n", branchInfo, entry.Index)
+	} else {
+		// Add the session
+		entry, err = registry.AddSession(worktreePath, branch)
+		if err != nil {
+			return fmt.Errorf("failed to add session: %w", err)
+		}
+
+		// Save registry
+		if err := registry.Save(); err != nil {
+			return fmt.Errorf("failed to save registry: %w", err)
+		}
+
+		branchInfo := ""
+		if entry.Branch != "" {
+			branchInfo = fmt.Sprintf(" (branch: %s)", entry.Branch)
+		}
+		fmt.Printf("Added session%s (index %d)\n", branchInfo, entry.Index)
+	}
+
+	// Load or discover config to start the daemon
+	var cfg *config.Config
+	var cfgPath string
+
+	if configPath != "" {
+		cfg, err = config.Load(configPath)
+		cfgPath = configPath
+	} else {
+		// Try to discover config from current directory first
+		cfg, cfgPath, err = config.Discover()
+		if err != nil {
+			// Fallback: try to discover from the session's worktree
+			cfg, cfgPath, err = config.DiscoverFrom(entry.Worktree)
+		}
+		if err != nil {
+			// Fallback: try to discover from the main repo path
+			cfg, cfgPath, err = config.DiscoverFrom(mainWorktreePath)
+		}
+	}
+	if err != nil {
+		// No config found, can't start daemon
+		fmt.Printf("No config found, session registered but daemon not started: %v\n", err)
+		return nil
+	}
+
+	logger.Debug("found config", zap.String("path", cfgPath))
+
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid config: %w", err)
+	}
+
+	socketPath := registry.GetSessionSocketPath(entry.Worktree)
+	sessionDir := registry.GetSessionDir(entry.Worktree)
+
+	// Check if daemon is already running
+	if isDaemonRunning(socketPath) {
+		fmt.Println("Daemon already running")
+		return nil
+	}
+
+	// Start daemon in background
+	fmt.Println("Starting daemon...")
+	if err := startDaemonForWorktree(mainWorktreePath, cfgPath, socketPath, sessionDir, entry.Index, entry.Worktree); err != nil {
+		return fmt.Errorf("failed to start daemon: %w", err)
+	}
+
+	// Wait for daemon to be ready
+	if err := waitForDaemon(socketPath, 10*time.Second); err != nil {
+		return fmt.Errorf("daemon failed to start: %w", err)
+	}
+
+	fmt.Println("Session is now running")
+	return nil
+}
+
+func runSessions(cmd *cobra.Command, args []string) error {
+	logger.Debug("listing sessions")
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	mainWorktreePath, err := worktree.FindMainWorktreePath(cwd)
+	if err != nil {
+		return fmt.Errorf("failed to find git repository: %w", err)
+	}
+
+	// Load registry
+	registry, err := session.LoadRegistry(mainWorktreePath)
+	if err != nil {
+		return fmt.Errorf("failed to load session registry: %w", err)
+	}
+
+	sessions := registry.ListSessions()
+	if len(sessions) == 0 {
+		fmt.Println("No sessions registered")
+		return nil
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "INDEX\tBRANCH\tWORKTREE\tSTATUS")
+	for _, sess := range sessions {
+		// Check if daemon is running
+		socketPath := registry.GetSessionSocketPath(sess.Worktree)
+		status := "stopped"
+		if isDaemonRunning(socketPath) {
+			status = "running"
+		}
+		branch := sess.Branch
+		if branch == "" {
+			branch = "-"
+		}
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\n", sess.Index, branch, sess.Worktree, status)
+	}
+	w.Flush()
+
+	return nil
+}
+
+func runRoute(cmd *cobra.Command, args []string) error {
+	target := args[0]
+	logger.Debug("routing ngrok to session", zap.String("target", target))
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	mainWorktreePath, err := worktree.FindMainWorktreePath(cwd)
+	if err != nil {
+		return fmt.Errorf("failed to find git repository: %w", err)
+	}
+
+	// Load registry
+	registry, err := session.LoadRegistry(mainWorktreePath)
+	if err != nil {
+		return fmt.Errorf("failed to load session registry: %w", err)
+	}
+
+	// Resolve the target session (by branch name, worktree path, or current directory)
+	var entry *session.SessionEntry
+	if target == "." {
+		// Find session by current worktree
+		entry = registry.FindSessionByWorktree(cwd)
+		if entry == nil {
+			return fmt.Errorf("no session found for current worktree")
+		}
+	} else if filepath.IsAbs(target) || strings.Contains(target, string(filepath.Separator)) {
+		// Target is a path, resolve to absolute and find session
+		absTarget, err := filepath.Abs(target)
+		if err != nil {
+			return fmt.Errorf("failed to resolve path: %w", err)
+		}
+		entry = registry.FindSessionByWorktree(absTarget)
+		if entry == nil {
+			return fmt.Errorf("no session found for worktree %q", absTarget)
+		}
+	} else {
+		// Target is a branch name - try to find by branch
+		entry = registry.FindSessionByBranch(target)
+		if entry == nil {
+			return fmt.Errorf("no session found for branch %q", target)
+		}
+	}
+
+	// Load or discover config (use same logic as start command)
+	var cfg *config.Config
+	var cfgPath string
+
+	if configPath != "" {
+		cfg, err = config.Load(configPath)
+		cfgPath = configPath
+	} else {
+		cfg, cfgPath, err = config.Discover()
+	}
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	_ = cfgPath // We don't need cfgPath for routing
+
+	// Create template context for the target session
+	templateCtx := config.TemplateContext{
+		Index: entry.Index,
+	}
+
+	// Expand config with session's context
+	expandedCfg, err := cfg.Expand(templateCtx)
+	if err != nil {
+		return fmt.Errorf("failed to expand config: %w", err)
+	}
+
+	// Check if ngrok is configured
+	if expandedCfg.Ngrok == nil || expandedCfg.Ngrok.Port == "" {
+		return fmt.Errorf("ngrok port is not configured in config")
+	}
+
+	// Evaluate the port template
+	port, err := config.ExpandPortTemplate(expandedCfg, expandedCfg.Ngrok.Port, templateCtx)
+	if err != nil {
+		return fmt.Errorf("failed to resolve port: %w", err)
+	}
+
+	// Find the first running session to connect to (ngrok owner)
+	// TODO: This should connect to whichever daemon owns ngrok
+	sessions := registry.ListSessions()
+	var ownerSocketPath string
+	for _, sess := range sessions {
+		sp := registry.GetSessionSocketPath(sess.Worktree)
+		if isDaemonRunning(sp) {
+			ownerSocketPath = sp
+			break
+		}
+	}
+	if ownerSocketPath == "" {
+		return fmt.Errorf("no running daemon found, start one first with 'sm start'")
+	}
+
+	client, err := daemon.Connect(ownerSocketPath)
+	if err != nil {
+		return fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer client.Close()
+
+	// Send route command
+	branchInfo := ""
+	if entry.Branch != "" {
+		branchInfo = fmt.Sprintf(" (branch: %s)", entry.Branch)
+	}
+	fmt.Printf("Routing ngrok to session%s (port %d)...\n", branchInfo, port)
+	publicURL, err := client.Route(entry.Worktree, port)
+	if err != nil {
+		return fmt.Errorf("route failed: %w", err)
+	}
+
+	// Update registry with routed session
+	registry.SetRoutedSession(entry.Worktree)
+	if err := registry.Save(); err != nil {
+		logger.Warn("failed to save registry", zap.Error(err))
+	}
+
+	fmt.Printf("Ngrok tunnel active:\n")
+	if entry.Branch != "" {
+		fmt.Printf("  Branch:     %s\n", entry.Branch)
+	}
+	fmt.Printf("  Worktree:   %s\n", entry.Worktree)
+	fmt.Printf("  Local port: %d\n", port)
+	fmt.Printf("  Public URL: %s\n", publicURL)
+
+	return nil
+}
+
 // Helper functions
 
 func isDaemonRunning(socketPath string) bool {
@@ -510,15 +1023,14 @@ func isDaemonRunning(socketPath string) bool {
 	return true
 }
 
-func startDaemon(repoRoot, configPath, socketPath string) error {
+func startDaemonForWorktree(repoRoot, configPath, socketPath, sessionDir string, sessIndex int, worktreePath string) error {
 	// Get the path to the current executable
 	executable, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to get executable path: %w", err)
 	}
 
-	// Determine log file path (same directory as socket)
-	sessionDir := filepath.Dir(socketPath)
+	// Determine log file path in session directory
 	daemonLogPath := filepath.Join(sessionDir, "daemon.log")
 
 	// Open log file for daemon output
@@ -528,21 +1040,32 @@ func startDaemon(repoRoot, configPath, socketPath string) error {
 	}
 
 	// Start daemon process
-	cmdArgs := []string{"daemon", "--repo", repoRoot, "--socket", socketPath, "-v"}
+	cmdArgs := []string{
+		"daemon",
+		"--repo", repoRoot,
+		"--socket", socketPath,
+		"--session-index", fmt.Sprintf("%d", sessIndex),
+		"--worktree", worktreePath,
+		"-v",
+	}
 	if configPath != "" {
 		cmdArgs = append(cmdArgs, "--config", configPath)
 	}
 
-	daemonCmd := exec.Command(executable, cmdArgs...)
-	daemonCmd.Dir = repoRoot
+	cmd := exec.Command(executable, cmdArgs...)
+	cmd.Dir = repoRoot
 
 	// Redirect output to log file
-	daemonCmd.Stdin = nil
-	daemonCmd.Stdout = logFile
-	daemonCmd.Stderr = logFile
+	cmd.Stdin = nil
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
 
-	// Start in new process group
-	if err := daemonCmd.Start(); err != nil {
+	// Start in new process group so signals don't propagate from parent
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+
+	if err := cmd.Start(); err != nil {
 		logFile.Close()
 		return fmt.Errorf("failed to start daemon process: %w", err)
 	}
@@ -551,7 +1074,7 @@ func startDaemon(repoRoot, configPath, socketPath string) error {
 
 	// Release the process so it runs independently
 	// Note: we don't close logFile here - the daemon process owns it now
-	if err := daemonCmd.Process.Release(); err != nil {
+	if err := cmd.Process.Release(); err != nil {
 		logger.Debug("failed to release daemon process", zap.Error(err))
 	}
 
@@ -627,7 +1150,14 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		zap.String("repo", daemonRepoPath),
 		zap.String("socket", daemonSocketPath),
 		zap.String("config", daemonConfigPath),
+		zap.String("worktree", daemonWorktreePath),
+		zap.Int("session_index", daemonSessionIndex),
 	)
+
+	// Worktree path is required
+	if daemonWorktreePath == "" {
+		return fmt.Errorf("--worktree flag is required")
+	}
 
 	// Load configuration
 	var cfg *config.Config
@@ -648,24 +1178,23 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid config: %w", err)
 	}
 
-	// Create or load session
-	sess, err := session.NewSession(daemonRepoPath)
+	// Create or load session for the worktree
+	sess, err := session.NewSessionForWorktree(daemonRepoPath, daemonWorktreePath, daemonSessionIndex)
 	if err != nil {
 		return fmt.Errorf("failed to create session: %w", err)
 	}
 
-	// Get current worktree and update session
-	currentWorktree, err := worktree.Current()
+	// Resolve the worktree to get branch info
+	wt, err := worktree.Resolve(daemonRepoPath, daemonWorktreePath)
 	if err != nil {
-		logger.Warn("could not determine current worktree, using repo path", zap.Error(err))
-		// Fallback to repo path - still need a worktree to start processes
-		sess.UpdateWorktree(daemonRepoPath, "")
+		logger.Warn("could not resolve worktree, using path directly", zap.Error(err))
+		sess.UpdateWorktree(daemonWorktreePath, "")
 	} else {
-		sess.UpdateWorktree(currentWorktree.Path, currentWorktree.Branch)
+		sess.UpdateWorktree(wt.Path, wt.Branch)
 	}
 
 	// Create the daemon using the daemon package
-	d, err := daemon.New(sess, cfg, cfgPath, logger)
+	d, err := daemon.New(sess, cfg, cfgPath, daemonSocketPath, logger)
 	if err != nil {
 		return fmt.Errorf("failed to create daemon: %w", err)
 	}
