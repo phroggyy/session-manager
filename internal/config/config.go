@@ -18,6 +18,16 @@ import (
 type Config struct {
 	EnvFile   string          `yaml:"env_file,omitempty" json:"env_file,omitempty"`
 	Processes []ProcessConfig `yaml:"processes" json:"processes"`
+	Ngrok     *NgrokConfig    `yaml:"ngrok,omitempty" json:"ngrok,omitempty"`
+}
+
+// NgrokConfig represents ngrok tunnel configuration.
+// Now supports a single tunnel that can be dynamically routed to different sessions.
+type NgrokConfig struct {
+	AuthToken string `yaml:"auth_token,omitempty" json:"auth_token,omitempty"`
+	Region    string `yaml:"region,omitempty" json:"region,omitempty"`
+	Subdomain string `yaml:"subdomain,omitempty" json:"subdomain,omitempty"` // Static subdomain (URL stays same)
+	Port      string `yaml:"port" json:"port"`                               // Template like "${processes.dashboard.env.PORT}"
 }
 
 // ProcessConfig defines a process to manage
@@ -77,21 +87,22 @@ func Load(path string) (*Config, error) {
 // Discover finds and loads config from cwd walking up to git root
 // Returns the config and the path where it was found
 func Discover() (*Config, string, error) {
-	logger, _ := zap.NewProduction()
-	defer logger.Sync()
-
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to get current working directory: %w", err)
 	}
+	return DiscoverFrom(cwd)
+}
 
-	gitRoot, err := findGitRoot(cwd)
+// DiscoverFrom finds and loads config from a given directory walking up to git root
+// Returns the config and the path where it was found
+func DiscoverFrom(startDir string) (*Config, string, error) {
+	gitRoot, err := findGitRoot(startDir)
 	if err != nil {
-		logger.Debug("no git root found, will search up to filesystem root", zap.Error(err))
 		gitRoot = "/" // Fall back to filesystem root
 	}
 
-	configPath, err := findConfigFile(cwd, gitRoot)
+	configPath, err := findConfigFile(startDir, gitRoot)
 	if err != nil {
 		return nil, "", err
 	}

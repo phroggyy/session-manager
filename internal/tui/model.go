@@ -57,12 +57,23 @@ func NewWithStatus(client *daemon.Client, status *daemon.StatusResponse) *Model 
 			runningCount++
 		}
 	}
+	m.statusBar.SetSession(status.SessionName, status.SessionIndex)
 	m.statusBar.SetRunning(status.CurrentWorktree, status.CurrentBranch, runningCount)
+	m.statusBar.SetNgrokCount(len(status.NgrokTunnels))
 
-	// Create panes with initial status
+	// Set routing info if available
+	if status.RoutedSession != "" {
+		m.statusBar.SetRoutedSession(status.RoutedSession)
+	}
+	if len(status.NgrokTunnels) > 0 {
+		m.statusBar.SetNgrokURL(status.NgrokTunnels[0].PublicURL)
+	}
+
+	// Create panes with initial status and ports
 	for i, proc := range status.Processes {
 		pane := NewPane(proc.Name, 80, 24) // Default size, will be resized
 		pane.SetStatus(proc.Status)
+		pane.SetPorts(proc.Ports)
 		if i == 0 {
 			pane.SetFocused(true)
 		}
@@ -156,18 +167,47 @@ func (m Model) convertEvent(event daemon.Event) tea.Msg {
 		}
 	case daemon.EventProcessStatus:
 		if data, ok := event.Data.(daemon.ProcessStatusData); ok {
-			return ProcessStatusMsg{Name: data.Name, Status: data.Status}
+			return ProcessStatusMsg{Name: data.Name, Status: data.Status, Ports: data.Ports}
 		}
 		// Handle map[string]interface{} from JSON decoding
 		if data, ok := event.Data.(map[string]interface{}); ok {
+			var ports []uint32
+			if portsData, ok := data["ports"].([]interface{}); ok {
+				for _, p := range portsData {
+					if pFloat, ok := p.(float64); ok {
+						ports = append(ports, uint32(pFloat))
+					}
+				}
+			}
 			return ProcessStatusMsg{
 				Name:   getStringFromMap(data, "name"),
 				Status: getStringFromMap(data, "status"),
+				Ports:  ports,
 			}
 		}
 	case daemon.EventError:
 		if errStr, ok := event.Data.(string); ok {
 			return ErrorMsg{Err: fmt.Errorf("%s", errStr)}
+		}
+	case daemon.EventRoute:
+		if data, ok := event.Data.(daemon.RouteData); ok {
+			return RouteMsg{
+				SessionName: data.SessionName,
+				Port:        data.Port,
+				PublicURL:   data.PublicURL,
+			}
+		}
+		// Handle map[string]interface{} from JSON decoding
+		if data, ok := event.Data.(map[string]interface{}); ok {
+			port := 0
+			if p, ok := data["port"].(float64); ok {
+				port = int(p)
+			}
+			return RouteMsg{
+				SessionName: getStringFromMap(data, "session_name"),
+				Port:        port,
+				PublicURL:   getStringFromMap(data, "public_url"),
+			}
 		}
 	}
 	return nil
@@ -301,15 +341,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.subscribeToEvents())
 
 	case ProcessStatusMsg:
-		// Update pane status
+		// Update pane status and ports
 		for i := range m.panes {
 			if m.panes[i].GetName() == msg.Name {
-				m.panes[i].SetStatus(msg.Status)
+				if msg.Status != "" {
+					m.panes[i].SetStatus(msg.Status)
+				}
+				if msg.Ports != nil {
+					m.panes[i].SetPorts(msg.Ports)
+				}
 				break
 			}
 		}
 		// Update process count in status bar
 		m.updateStatusBarProcessCount()
+		cmds = append(cmds, m.subscribeToEvents())
+
+	case RouteMsg:
+		// Update status bar with routing info
+		m.statusBar.SetRoutedSession(msg.SessionName)
+		m.statusBar.SetNgrokURL(msg.PublicURL)
 		cmds = append(cmds, m.subscribeToEvents())
 
 	case ErrorMsg:
@@ -386,16 +437,27 @@ func (m *Model) refreshFromDaemon() {
 		if proc.Status == "running" {
 			runningCount++
 		}
-		// Update pane status
+		// Update pane status and ports
 		for i := range m.panes {
 			if m.panes[i].GetName() == proc.Name {
 				m.panes[i].SetStatus(proc.Status)
+				m.panes[i].SetPorts(proc.Ports)
 				break
 			}
 		}
 	}
 
+	m.statusBar.SetSession(status.SessionName, status.SessionIndex)
 	m.statusBar.SetRunning(status.CurrentWorktree, status.CurrentBranch, runningCount)
+	m.statusBar.SetNgrokCount(len(status.NgrokTunnels))
+
+	// Update routing info
+	if status.RoutedSession != "" {
+		m.statusBar.SetRoutedSession(status.RoutedSession)
+	}
+	if len(status.NgrokTunnels) > 0 {
+		m.statusBar.SetNgrokURL(status.NgrokTunnels[0].PublicURL)
+	}
 }
 
 // View renders the TUI.

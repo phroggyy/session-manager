@@ -8,6 +8,7 @@ const (
 	EventSwitch        EventType = "switch"
 	EventProcessStatus EventType = "process_status"
 	EventError         EventType = "error"
+	EventRoute         EventType = "route"
 )
 
 // Event represents an event that can be broadcast to subscribers.
@@ -27,7 +28,15 @@ type SwitchData struct {
 
 // ProcessStatusData contains information about a process status change.
 type ProcessStatusData struct {
-	Name   string `json:"name"`
-	Status string `json:"status"`
-	PID    int    `json:"pid"`
+	Name   string   `json:"name"`
+	Status string   `json:"status"`
+	PID    int      `json:"pid"`
+	Ports  []uint32 `json:"ports,omitempty"`
+}
+
+// RouteData contains information about an ngrok routing change.
+type RouteData struct {
+	SessionName string `json:"session_name"`
+	Port        int    `json:"port"`
+	PublicURL   string `json:"public_url"`
 }

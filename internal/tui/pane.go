@@ -14,6 +14,7 @@ type Pane struct {
 	viewport viewport.Model
 	content  strings.Builder
 	status   string // Running, Stopped, Crashed
+	ports    []uint32
 	focused  bool
 }
 
@@ -55,9 +56,15 @@ func (p *Pane) View() string {
 		titleStyle = PaneTitleStyle
 	}
 
-	// Build title with status indicator
+	// Build title with status indicator and ports
 	statusIndicator := GetStatusIndicator(p.status)
-	title := titleStyle.Render(p.name) + " " + statusIndicator
+	var title string
+	if len(p.ports) > 0 {
+		portsStr := formatPorts(p.ports)
+		title = titleStyle.Render(fmt.Sprintf("[%s:%s]", p.name, portsStr)) + " " + statusIndicator
+	} else {
+		title = titleStyle.Render(p.name) + " " + statusIndicator
+	}
 
 	// Calculate width for the title bar
 	titleWidth := p.viewport.Width
@@ -116,6 +123,16 @@ func (p *Pane) GetName() string {
 // GetStatus returns the pane's current status.
 func (p *Pane) GetStatus() string {
 	return p.status
+}
+
+// SetPorts updates the pane's detected ports.
+func (p *Pane) SetPorts(ports []uint32) {
+	p.ports = ports
+}
+
+// GetPorts returns the pane's current ports.
+func (p *Pane) GetPorts() []uint32 {
+	return p.ports
 }
 
 // SetSize updates the pane dimensions.
@@ -192,4 +209,18 @@ func (p *Pane) ScrollPercent() float64 {
 // String implements fmt.Stringer for debugging.
 func (p *Pane) String() string {
 	return fmt.Sprintf("Pane{name: %s, status: %s, focused: %v}", p.name, p.status, p.focused)
+}
+
+// formatPorts formats a list of ports for display in the pane title.
+func formatPorts(ports []uint32) string {
+	if len(ports) == 0 {
+		return ""
+	}
+	if len(ports) == 1 {
+		return fmt.Sprintf("%d", ports[0])
+	}
+	if len(ports) == 2 {
+		return fmt.Sprintf("%d,%d", ports[0], ports[1])
+	}
+	return fmt.Sprintf("%d,%d+%d", ports[0], ports[1], len(ports)-2)
 }

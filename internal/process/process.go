@@ -40,6 +40,7 @@ type Process struct {
 	Env          map[string]string
 	StartedAt    time.Time
 	WorktreePath string
+	Ports        []uint32 // Detected listening ports
 
 	cmd        *exec.Cmd
 	logFile    *os.File
@@ -60,6 +61,7 @@ func newProcess(name, command, cwd, worktreePath string, env map[string]string) 
 		Cwd:          cwd,
 		Env:          env,
 		WorktreePath: worktreePath,
+		Ports:        []uint32{},
 		outputChan:   make(chan []byte, 1024),
 		done:         make(chan struct{}),
 		subscribers:  make(map[chan []byte]struct{}),

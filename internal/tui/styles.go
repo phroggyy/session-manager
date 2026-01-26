@@ -53,6 +53,14 @@ var (
 
 	ProcessCountStyle = lipgloss.NewStyle().
 				Foreground(textDimColor)
+
+	SessionBadgeStyle = lipgloss.NewStyle().
+				Foreground(primaryColor).
+				Bold(true)
+
+	NgrokIndicatorStyle = lipgloss.NewStyle().
+				Foreground(accentColor).
+				Bold(true)
 )
 
 // Pane styles
